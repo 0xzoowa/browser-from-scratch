@@ -9,6 +9,12 @@ import ssl
 
 class URL:
     def __init__(self, url):
+        self.view_source = False
+
+        if url.startswith("view-source:"):
+            self.view_source = True
+            url = url[len("view-source:"):]
+
         self.scheme, url = url.split(":",1)
        
         if self.scheme == "http":
@@ -95,20 +101,32 @@ class URL:
             s.close()
             return content
 
-def show(body):
+def show(body, view_source):
+
+    if view_source:
+        print(body, end="")
+        return
+    
     in_tag = False
+    output = ""
     for c in body:
         if c == "<":
             in_tag = True
         elif c == ">":
             in_tag = False
         elif not in_tag:
-            print(c, end="")
+            output += c
+
+    output = output.replace("&lt;", "<")
+    output = output.replace("&gt;", ">")
+
+    print(output, end="")
 
 
 def load(url):
     body = url.request()
-    show(body)
+    show(body, url.view_source)
+  
 
 if __name__ == "__main__":
     load(URL(sys.argv[1]))
