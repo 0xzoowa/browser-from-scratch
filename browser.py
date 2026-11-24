@@ -1,11 +1,10 @@
-#http://example.org/index.html
-#Scheme --> http
-#Hostname --> example.org
-#Path --> /index.html
-
 import socket
 import sys
 import ssl
+import time
+
+sockets = {}
+cache = {}
 
 class URL:
     def __init__(self, url):
@@ -46,23 +45,42 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
-    def request(self, version="1.1"):
+    def request(self, version="1.1",  redirect_count=0):
+        
         if self.scheme == "file":
             with open(self.path, "r", encoding="utf8") as f:
                 return f.read()
         elif self.scheme == "data":
             metadata, content = self.data.split(",", 1)
             return content
+        
         elif self.scheme == "http" or self.scheme == "https" :
-         
-            s = socket.socket(
-                family=socket.AF_INET,
-                type=socket.SOCK_STREAM,
-                proto=socket.IPPROTO_TCP
-            )
 
-            #s.connect((self.host, 80)) 
-            s.connect((self.host, self.port))
+            socket_key = (self.host, self.port)
+            cache_key = (self.scheme, self.host, self.port, self.path)
+
+            if cache_key in cache:
+                expires, body = cache[cache_key]
+
+                if time.monotonic() < expires:
+                    print("CACHE HIT")
+                    return body
+                else:
+                    del cache[cache_key]
+
+            if socket_key in sockets:
+                 s = sockets[socket_key]
+            else:
+         
+                s = socket.socket(
+                    family=socket.AF_INET,
+                    type=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP
+                )
+
+                s.connect(socket_key)
+                sockets[socket_key] = s
+
             if self.scheme == "https":
                 ctx = ssl.create_default_context()
                 s = ctx.wrap_socket(s, server_hostname=self.host)
@@ -71,35 +89,86 @@ class URL:
 
             request_headers = {
                     "Host": self.host,
-                    "Connection": "close",
+                    "Connection": "keep-alive",
                     "User-Agent": " IamGroot/0.1"
             }
 
             for k,v in request_headers.items():
                 request += "{}: {}\r\n".format(k,v)
-            # request += "Host: {}\r\n".format(self.host)
             
             request += "\r\n"
-            s.send(request.encode("utf8"))
-            response = s.makefile("r", encoding="utf8", newline="\r\n")
-            statusline = response.readline()
+            s.sendall(request.encode("utf8"))
+            response = s.makefile("rb")
+            statusline = response.readline().decode("utf8")
             request_version, status, explanation = statusline.split(" ", 2)
 
             response_headers = {}
             while True:
-                line = response.readline()
+                line = response.readline().decode("utf8")
                 if(line == "\r\n") : break
                 header, value = line.split(":", 1)
                 response_headers[header.casefold()] = value.strip()
 
-            #malformed data
-            assert "transfer-encoding" not in response_headers
-            assert "content-encoding" not in response_headers
-            # assert "content-type" not in response_headers
+            content_length = int(response_headers["content-length"])
+            content = response.read(content_length)
 
-            content = response.read()
-            s.close()
-            return content
+            response.close()
+
+            status_code = int(status)
+
+            if 300 <= status_code < 400 and "location" in response_headers:
+                if redirect_count >= 10:
+                    raise Exception("Too many redirects")
+
+                location = response_headers["location"]
+
+                if location.startswith("/"):
+                    location = "{}://{}:{}{}".format(
+                        self.scheme,
+                        self.host,
+                        self.port,
+                        location
+                    )
+
+                new_url = URL(location)
+                new_url.view_source = self.view_source
+
+                return new_url.request(version, redirect_count + 1)   
+ 
+            body = content.decode("utf8")
+            if status == "200":
+                cache_control = response_headers.get("cache-control")
+                max_age = get_cache_lifetime(cache_control)
+
+            if max_age is not None and max_age > 0:
+                expires = time.monotonic() + max_age
+                cache[cache_key] = (expires, body)
+
+def get_cache_lifetime(cache_control):
+
+    if not cache_control: 
+        return None
+
+    directives = [
+        directive.strip().lower()
+        for directive in cache_control.split(",")
+
+    ]
+    if "no-store" in directives:
+        return None
+
+    if len(directives) != 1:
+        return None
+
+    directive = directives[0]
+
+    if not directive.startswith("max-age="):
+        return None
+
+    try:
+        return int(directive.split("=", 1)[1])
+    except ValueError:
+        return None
 
 def show(body, view_source):
 
